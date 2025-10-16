@@ -1,4 +1,11 @@
-import { Line, type Extension } from "@codemirror/state";
+import {
+	Line,
+	StateEffect,
+	StateField,
+	RangeSetBuilder,
+	EditorSelection,
+	type Extension,
+} from "@codemirror/state";
 import {
 	EditorView,
 	GutterMarker,
@@ -7,7 +14,6 @@ import {
 	gutter,
 } from "@codemirror/view";
 
-import { StateEffect, StateField, RangeSetBuilder } from "@codemirror/state";
 import { Decoration, DecorationSet } from "@codemirror/view";
 
 const setHighlightedLine = StateEffect.define<number | null>();
@@ -155,12 +161,77 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 		handleMouseUp(_event: MouseEvent): void {
 			if (this.dragLine == null) return;
 
-			this.view.dispatch({ effects: setHighlightedLine.of(null) });
+			const state = this.view.state;
+			const doc = state.doc;
+			const dropPos = this.dropLine;
+			const dragLine = doc.lineAt(this.dragLine);
+			const dragLineEnd = dragLine.number < doc.lines ? doc.line(dragLine.number + 1).from : dragLine.to;
+
+			const effects = [setHighlightedLine.of(null)];
 			if (this.dropLine != null) {
-				this.view.dispatch({ effects: setDropIndicator.of(null) });
-				this.dropLine = null;
+				effects.push(setDropIndicator.of(null));
 			}
+
+			let changes: { from: number; to: number; insert: string } | undefined;
+			let selection: EditorSelection | undefined;
+
+			if (dropPos != null && (dropPos < dragLine.from || dropPos > dragLineEnd)) {
+				const lines = doc.toJSON();
+				const dragIndex = dragLine.number - 1;
+				const trailingEmpty = lines.length > 0 && lines[lines.length - 1] === "";
+
+				let targetIndex: number;
+				if (dropPos >= doc.length) {
+					targetIndex = trailingEmpty ? lines.length - 1 : lines.length;
+				} else {
+					const dropLineInfo = doc.lineAt(dropPos);
+					targetIndex = dropLineInfo.number - 1;
+				}
+
+				if (targetIndex > dragIndex) {
+					targetIndex -= 1;
+				}
+
+				if (targetIndex !== dragIndex) {
+					const [movedLine] = lines.splice(dragIndex, 1);
+					if (movedLine != null) {
+						if (targetIndex < 0) {
+							targetIndex = 0;
+						}
+						if (targetIndex > lines.length) {
+							targetIndex = lines.length;
+						}
+						lines.splice(targetIndex, 0, movedLine);
+
+						const lineBreak = state.lineBreak;
+						const newDoc = lines.join(lineBreak);
+
+						changes = { from: 0, to: doc.length, insert: newDoc };
+
+						const lineBreakLength = lineBreak.length;
+						let anchor = 0;
+						for (let i = 0; i < targetIndex; i++) {
+							anchor += lines[i].length;
+							anchor += lineBreakLength;
+						}
+						selection = EditorSelection.cursor(anchor);
+					}
+				}
+			}
+
+			const spec: Parameters<EditorView["dispatch"]>[0] = { effects };
+			if (changes) {
+				spec.changes = changes;
+			}
+			if (selection) {
+				spec.selection = selection;
+				spec.scrollIntoView = true;
+			}
+
+			this.view.dispatch(spec);
+
 			this.dragLine = null;
+			this.dropLine = null;
 
 			this.removeWindowMouseUp?.();
 			this.removeWindowMouseUp = null;
@@ -205,7 +276,12 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 			}
 
 			const midpoint = (topY + bottomY) / 2;
-			const targetPos = event.clientY <= midpoint ? line.from : line.to;
+			const isBefore = event.clientY <= midpoint;
+			const targetPos = isBefore
+				? line.from
+				: line.number < doc.lines
+					? doc.line(line.number + 1).from
+					: line.to;
 
 			if (this.dropLine === targetPos) {
 				return;
