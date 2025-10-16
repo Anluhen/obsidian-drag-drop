@@ -102,9 +102,9 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 
 		handleMouseDown(event: MouseEvent): void {
 
-		// 	if (event.button !== 0) {
-		// 		return;
-		// 	}
+			// 	if (event.button !== 0) {
+			// 		return;
+			// 	}
 
 			const target = event.target as HTMLElement | null;
 			console.log("target: ", target);
@@ -117,9 +117,9 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 				return;
 			}
 
-		// 	event.preventDefault();
-		// 	event.stopPropagation();
-		// 	this.view.focus();
+			// 	event.preventDefault();
+			// 	event.stopPropagation();
+			// 	this.view.focus();
 
 			const line = this.view.state.doc.lineAt(lineStart) as Line;
 
@@ -130,8 +130,25 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 			// this.startDrag(line, event);
 		}
 
-		// private startDrag(line: DocumentLine, event: MouseEvent): void {
-		// 	this.teardownDrag();
+		handleMouseUp(event: MouseEvent): void {
+			console.log("Mouse Up!")
+			const target = event.target as HTMLElement | null;
+			console.log("target", target)
+
+			const lineStart = Number(target?.dataset.lineStart);
+			if (Number.isNaN(lineStart)) {
+				return;
+			}
+
+			this.view.dispatch({
+				effects: setHighlightedLine.of(null),
+			});
+
+		}
+
+		private startDrag(line: Line, event: MouseEvent): void {
+			console.log('Dragging!');
+			// this.teardownDrag();
 
 			// const ghost = createGhost(line.text);
 			// this.dragging = {
@@ -271,8 +288,9 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 	},
 	{
 		eventHandlers: {
-			mousedown(event: Event) {
-				this.handleMouseDown(event as MouseEvent);
+			mouseup(event: Event) {
+				this.handleMouseUp(event as MouseEvent);
+				return true; // stop the editor-wide handler
 			},
 		},
 	},
