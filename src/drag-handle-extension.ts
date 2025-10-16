@@ -3,6 +3,7 @@ import {
 	EditorView,
 	GutterMarker,
 	ViewPlugin,
+	WidgetType,
 	gutter,
 } from "@codemirror/view";
 
@@ -10,13 +11,25 @@ import { StateEffect, StateField, RangeSetBuilder } from "@codemirror/state";
 import { Decoration, DecorationSet } from "@codemirror/view";
 
 const setHighlightedLine = StateEffect.define<number | null>();
+const setDropIndicator = StateEffect.define<number | null>();
+
+class DropIndicatorWidget extends WidgetType {
+	toDOM(): HTMLElement {
+		const element = document.createElement("div");
+		element.className = "cm-drop-indicator";
+		return element;
+	}
+
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
 
 const highlightedLineField = StateField.define<DecorationSet>({
 	create() {
 		return Decoration.none;
 	},
 	update(decos, tr) {
-		// Keep existing decorations aligned with doc changes.
 		decos = decos.map(tr.changes);
 
 		for (const effect of tr.effects) {
@@ -27,6 +40,38 @@ const highlightedLineField = StateField.define<DecorationSet>({
 				const builder = new RangeSetBuilder<Decoration>();
 				const line = tr.state.doc.lineAt(effect.value);
 				builder.add(line.from, line.from, Decoration.line({ class: "cm-drag-source" }));
+				return builder.finish();
+			}
+		}
+
+		return decos;
+	},
+	provide: field => EditorView.decorations.from(field),
+});
+
+const dropIndicatorField = StateField.define<DecorationSet>({
+	create() {
+		return Decoration.none;
+	},
+	update(decos, tr) {
+		decos = decos.map(tr.changes);
+
+		for (const effect of tr.effects) {
+			if (effect.is(setDropIndicator)) {
+				if (effect.value == null) {
+					return Decoration.none;
+				}
+
+				const builder = new RangeSetBuilder<Decoration>();
+				builder.add(
+					effect.value,
+					effect.value,
+					Decoration.widget({
+						block: true,
+						widget: new DropIndicatorWidget(),
+					}),
+				);
+
 				return builder.finish();
 			}
 		}
@@ -56,13 +101,21 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 		private dropLine: number | null = null;
 		private dragLine: number | null = null;
 		private removeWindowMouseUp: (() => void) | null = null;
+		private removeWindowMouseMove: (() => void) | null = null;
 		private readonly onWindowMouseUp = (event: MouseEvent) => this.handleMouseUp(event);
+		private readonly onWindowMouseMove = (event: MouseEvent) => this.handleMouseMove(event);
 
 		constructor(private readonly view: EditorView) { }
 
 		destroy(): void {
+			if (this.dropLine != null) {
+				this.view.dispatch({ effects: setDropIndicator.of(null) });
+				this.dropLine = null;
+			}
 			this.removeWindowMouseUp?.();
 			this.removeWindowMouseUp = null;
+			this.removeWindowMouseMove?.();
+			this.removeWindowMouseMove = null;
 		}
 
 		handleMouseDown(event: MouseEvent): void {
@@ -89,28 +142,77 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 					this.removeWindowMouseUp = null;
 				};
 			}
+
+			if (!this.removeWindowMouseMove) {
+				window.addEventListener("mousemove", this.onWindowMouseMove);
+				this.removeWindowMouseMove = () => {
+					window.removeEventListener("mousemove", this.onWindowMouseMove);
+					this.removeWindowMouseMove = null;
+				};
+			}
 		}
 
-		handleMouseUp(event: MouseEvent): void {
-
-			const target = event.target as HTMLElement | null;
-			console.log("target: ", target)
-			const lineStart = Number(target?.dataset.lineStart);
-			if (!Number.isNaN(lineStart)) {
-				const line = this.view.state.doc.lineAt(lineStart) as Line;
-
-				this.dropLine = line.from;
-
-				console.log("dropLine: ", this.dropLine)
-			}
-
+		handleMouseUp(_event: MouseEvent): void {
 			if (this.dragLine == null) return;
 
 			this.view.dispatch({ effects: setHighlightedLine.of(null) });
+			if (this.dropLine != null) {
+				this.view.dispatch({ effects: setDropIndicator.of(null) });
+				this.dropLine = null;
+			}
 			this.dragLine = null;
 
 			this.removeWindowMouseUp?.();
 			this.removeWindowMouseUp = null;
+			this.removeWindowMouseMove?.();
+			this.removeWindowMouseMove = null;
+		}
+
+		handleMouseMove(event: MouseEvent): void {
+			if (this.dragLine == null) return;
+
+			const pos = this.view.posAtCoords({ x: event.clientX, y: event.clientY });
+			if (pos == null) {
+				if (this.dropLine != null) {
+					this.view.dispatch({ effects: setDropIndicator.of(null) });
+					this.dropLine = null;
+				}
+				return;
+			}
+
+			const doc = this.view.state.doc;
+			const line = doc.lineAt(pos);
+
+			const topCoords = this.view.coordsAtPos(line.from);
+
+			let bottomCoords = this.view.coordsAtPos(line.to);
+			if (!bottomCoords) {
+				const nextLine = line.number < doc.lines ? doc.line(line.number + 1) : null;
+				if (nextLine) {
+					bottomCoords = this.view.coordsAtPos(nextLine.from);
+				}
+			}
+
+			if (!topCoords || !bottomCoords) {
+				return;
+			}
+
+			const topY = topCoords.top ?? topCoords.bottom;
+			const bottomY = bottomCoords.bottom ?? bottomCoords.top;
+
+			if (topY == null || bottomY == null) {
+				return;
+			}
+
+			const midpoint = (topY + bottomY) / 2;
+			const targetPos = event.clientY <= midpoint ? line.from : line.to;
+
+			if (this.dropLine === targetPos) {
+				return;
+			}
+
+			this.dropLine = targetPos;
+			this.view.dispatch({ effects: setDropIndicator.of(targetPos) });
 		}
 	},
 );
@@ -139,6 +241,12 @@ const dragHandleTheme = EditorView.baseTheme({
 	".cm-line.cm-drag-source": {
 		backgroundColor: "var(--background-modifier-hover)",
 	},
+	".cm-drop-indicator": {
+		borderTop: "2px solid var(--interactive-accent)",
+		height: "0",
+		margin: "0 -4px",
+		pointerEvents: "none",
+	},
 });
 
 export function createDragHandleExtension(): Extension {
@@ -163,6 +271,6 @@ export function createDragHandleExtension(): Extension {
 		},
 	});
 
-	return [dragHandleGutter, DragHandlePlugin, dragHandleTheme, highlightedLineField];
+	return [dragHandleGutter, DragHandlePlugin, dragHandleTheme, highlightedLineField, dropIndicatorField];
 
 }
