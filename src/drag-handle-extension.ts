@@ -1,10 +1,40 @@
-import { EditorSelection, type Extension } from "@codemirror/state";
+import { Line, type Extension } from "@codemirror/state";
 import {
 	EditorView,
 	GutterMarker,
 	ViewPlugin,
 	gutter,
 } from "@codemirror/view";
+
+import { StateEffect, StateField, RangeSetBuilder } from "@codemirror/state";
+import { Decoration, DecorationSet } from "@codemirror/view";
+
+const setHighlightedLine = StateEffect.define<number | null>();
+
+const highlightedLineField = StateField.define<DecorationSet>({
+	create() {
+		return Decoration.none;
+	},
+	update(decos, tr) {
+		// Keep existing decorations aligned with doc changes.
+		decos = decos.map(tr.changes);
+
+		for (const effect of tr.effects) {
+			if (effect.is(setHighlightedLine)) {
+				if (effect.value == null) {
+					return Decoration.none;
+				}
+				const builder = new RangeSetBuilder<Decoration>();
+				const line = tr.state.doc.lineAt(effect.value);
+				builder.add(line.from, line.from, Decoration.line({ class: "cm-drag-source" }));
+				return builder.finish();
+			}
+		}
+
+		return decos;
+	},
+	provide: field => EditorView.decorations.from(field),
+});
 
 // interface DragSession {
 // 	sourceLineNumber: number;
@@ -19,29 +49,29 @@ import {
 // 	text: string;
 // }
 
-function createGhost(text: string): HTMLElement {
-	const ghost = document.createElement("div");
-	ghost.className = "cm-drag-ghost";
-	ghost.textContent = text;
-	ghost.style.position = "fixed";
-	ghost.style.pointerEvents = "none";
-	ghost.style.padding = "4px 8px";
-	ghost.style.borderRadius = "4px";
-	ghost.style.background = "var(--background-modifier-cover, rgba(0, 0, 0, 0.85))";
-	ghost.style.color = "var(--text-normal, #fff)";
-	ghost.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.25)";
-	ghost.style.opacity = "0.95";
-	ghost.style.zIndex = "9999";
-	ghost.style.maxWidth = "320px";
-	ghost.style.fontFamily = "var(--font-monospace, monospace)";
-	ghost.style.fontSize = "0.85rem";
-	ghost.style.lineHeight = "1.4";
-	ghost.style.whiteSpace = "pre";
-	ghost.style.overflow = "hidden";
-	ghost.style.textOverflow = "ellipsis";
-	document.body.appendChild(ghost);
-	return ghost;
-}
+// function createGhost(text: string): HTMLElement {
+// 	const ghost = document.createElement("div");
+// 	ghost.className = "cm-drag-ghost";
+// 	ghost.textContent = text;
+// 	ghost.style.position = "fixed";
+// 	ghost.style.pointerEvents = "none";
+// 	ghost.style.padding = "4px 8px";
+// 	ghost.style.borderRadius = "4px";
+// 	ghost.style.background = "var(--background-modifier-cover, rgba(0, 0, 0, 0.85))";
+// 	ghost.style.color = "var(--text-normal, #fff)";
+// 	ghost.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.25)";
+// 	ghost.style.opacity = "0.95";
+// 	ghost.style.zIndex = "9999";
+// 	ghost.style.maxWidth = "320px";
+// 	ghost.style.fontFamily = "var(--font-monospace, monospace)";
+// 	ghost.style.fontSize = "0.85rem";
+// 	ghost.style.lineHeight = "1.4";
+// 	ghost.style.whiteSpace = "pre";
+// 	ghost.style.overflow = "hidden";
+// 	ghost.style.textOverflow = "ellipsis";
+// 	document.body.appendChild(ghost);
+// 	return ghost;
+// }
 
 class DragHandleMarker extends GutterMarker {
 	constructor(private readonly lineStart: number) {
@@ -71,50 +101,49 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 		// }
 
 		handleMouseDown(event: MouseEvent): void {
-			console.log("handleMouseDown")
 
 		// 	if (event.button !== 0) {
 		// 		return;
 		// 	}
 
-		// 	const target = event.target as HTMLElement | null;
-		// 	const handle = target?.closest<HTMLElement>(".cm-drag-handle");
-		// 	if (!handle) {
-		// 		return;
-		// 	}
+			const target = event.target as HTMLElement | null;
+			console.log("target: ", target);
+			// this.view
 
-		// 	const lineStartAttr = handle.dataset.lineStart;
-		// 	if (lineStartAttr == null) {
-		// 		return;
-		// 	}
+			// console.log("A handle!")
 
-		// 	const lineStart = Number(lineStartAttr);
-		// 	if (Number.isNaN(lineStart)) {
-		// 		return;
-		// 	}
+			const lineStart = Number(target?.dataset.lineStart);
+			if (Number.isNaN(lineStart)) {
+				return;
+			}
 
 		// 	event.preventDefault();
 		// 	event.stopPropagation();
 		// 	this.view.focus();
 
-		// 	const line = this.view.state.doc.lineAt(lineStart) as DocumentLine;
-		// 	this.startDrag(line, event);
+			const line = this.view.state.doc.lineAt(lineStart) as Line;
+
+			this.view.dispatch({
+				effects: setHighlightedLine.of(line.from),
+			});
+
+			// this.startDrag(line, event);
 		}
 
 		// private startDrag(line: DocumentLine, event: MouseEvent): void {
 		// 	this.teardownDrag();
 
-		// 	const ghost = createGhost(line.text);
-		// 	this.dragging = {
-		// 		sourceLineNumber: line.number,
-		// 		dropLine: line.number,
-		// 		ghost,
-		// 	};
+			// const ghost = createGhost(line.text);
+			// this.dragging = {
+			// 	sourceLineNumber: line.number,
+			// 	dropLine: line.number,
+			// 	ghost,
+			// };
 
-		// 	this.updateGhostPosition(event);
-		// 	window.addEventListener("mousemove", this.onMouseMove);
-		// 	window.addEventListener("mouseup", this.onMouseUp);
-		// }
+			// this.updateGhostPosition(event);
+			// window.addEventListener("mousemove", this.onMouseMove);
+			// window.addEventListener("mouseup", this.onMouseUp);
+		}
 
 		// private handleMouseMove(event: MouseEvent): void {
 		// 	if (!this.dragging) {
@@ -271,6 +300,9 @@ const dragHandleTheme = EditorView.baseTheme({
 	".cm-drag-ghost": {
 		backdropFilter: "blur(4px)",
 	},
+	".cm-line.cm-drag-source": {
+		backgroundColor: "var(--background-modifier-hover)",
+	},
 });
 
 export function createDragHandleExtension(): Extension {
@@ -279,8 +311,16 @@ export function createDragHandleExtension(): Extension {
 		lineMarker(_view, line) {
 			return new DragHandleMarker(line.from);
 		},
+		domEventHandlers: {
+			mousedown(view, _line, event) {
+				const handle = (event.target as HTMLElement).closest(".cm-drag-handle");
+				if (!handle) return false;
+				view.plugin(DragHandlePlugin)?.handleMouseDown(event as MouseEvent);
+				return true; // stop the editor-wide handler
+			},
+		},
 	});
 
-	return [dragHandleGutter, DragHandlePlugin, dragHandleTheme];
+	return [dragHandleGutter, DragHandlePlugin, dragHandleTheme, highlightedLineField];
 
 }
