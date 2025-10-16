@@ -104,9 +104,6 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 );
 
 const dragHandleTheme = EditorView.baseTheme({
-	".cm-drag-gutter": {
-		cursor: "grab",
-	},
 	".cm-drag-gutter .cm-drag-handle": {
 		cursor: "grab",
 		display: "flex",
@@ -120,10 +117,12 @@ const dragHandleTheme = EditorView.baseTheme({
 		content: '"::"',
 		color: "var(--text-muted, #888)",
 		fontSize: "0.7rem",
-		letterSpacing: "0.1rem",
+		letterSpacing: "0.2rem",
+		opacity: 0,
+		transition: "opacity 120ms ease",
 	},
-	".cm-drag-ghost": {
-		backdropFilter: "blur(4px)",
+	".cm-drag-gutter .cm-drag-handle:hover::after": {
+		opacity: 1,
 	},
 	".cm-line.cm-drag-source": {
 		backgroundColor: "var(--background-modifier-hover)",
