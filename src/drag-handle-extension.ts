@@ -4,6 +4,8 @@ import {
 	StateField,
 	RangeSetBuilder,
 	EditorSelection,
+	SelectionRange,
+	Text,
 	type Extension,
 } from "@codemirror/state";
 import {
@@ -106,6 +108,9 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 	class DragHandleController {
 		private dropLine: number | null = null;
 		private dragLine: number | null = null;
+		private dragBlockEnd: number | null = null;
+		private dragStartLineIndex: number | null = null;
+		private dragLineCount: number | null = null;
 		private removeWindowMouseUp: (() => void) | null = null;
 		private removeWindowMouseMove: (() => void) | null = null;
 		private readonly onWindowMouseUp = (event: MouseEvent) => this.handleMouseUp(event);
@@ -118,6 +123,10 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 				this.view.dispatch({ effects: setDropIndicator.of(null) });
 				this.dropLine = null;
 			}
+			this.dragLine = null;
+			this.dragBlockEnd = null;
+			this.dragStartLineIndex = null;
+			this.dragLineCount = null;
 			this.removeWindowMouseUp?.();
 			this.removeWindowMouseUp = null;
 			this.removeWindowMouseMove?.();
@@ -133,12 +142,20 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 				return;
 			}
 
-			const line = this.view.state.doc.lineAt(lineStart) as Line;
+			const doc = this.view.state.doc;
+			const line = doc.lineAt(lineStart) as Line;
+			const { startLine, endLine } = this.resolveBlockRange(doc, line);
+			const startLineInfo = doc.line(startLine);
+			const lineCount = Math.max(1, endLine - startLine + 1);
 
-			this.dragLine = line.from;
+			this.dragStartLineIndex = startLine - 1;
+			this.dragLineCount = lineCount;
+			this.dragLine = startLineInfo.from;
+			this.dragBlockEnd = endLine < doc.lines ? doc.line(endLine + 1).from : doc.length;
+			this.dropLine = null;
 
 			this.view.dispatch({
-				effects: setHighlightedLine.of(line.from),
+				effects: setHighlightedLine.of(this.dragLine),
 			});
 
 			if (!this.removeWindowMouseUp) {
@@ -161,61 +178,61 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 		handleMouseUp(_event: MouseEvent): void {
 			if (this.dragLine == null) return;
 
-			const state = this.view.state;
-			const doc = state.doc;
-			const dropPos = this.dropLine;
-			const dragLine = doc.lineAt(this.dragLine);
-			const dragLineEnd = dragLine.number < doc.lines ? doc.line(dragLine.number + 1).from : dragLine.to;
-
 			const effects = [setHighlightedLine.of(null)];
 			if (this.dropLine != null) {
 				effects.push(setDropIndicator.of(null));
 			}
 
+			const state = this.view.state;
+			const doc = state.doc;
+			const startIndex = this.dragStartLineIndex;
+			const lineCount = this.dragLineCount;
+			const dropPos = this.dropLine;
+			const lineBreak = state.lineBreak;
+
 			let changes: { from: number; to: number; insert: string } | undefined;
-			let selection: EditorSelection | undefined;
+			let selection: SelectionRange | undefined;
 
-			if (dropPos != null && (dropPos < dragLine.from || dropPos > dragLineEnd)) {
+			if (startIndex != null && lineCount != null && dropPos != null) {
 				const lines = doc.toJSON();
-				const dragIndex = dragLine.number - 1;
-				const trailingEmpty = lines.length > 0 && lines[lines.length - 1] === "";
+				const trailingEmpty = lines.length > 1 && lines[lines.length - 1] === "";
+				let targetIndex =
+					dropPos >= doc.length
+						? trailingEmpty
+							? lines.length - 1
+							: lines.length
+						: doc.lineAt(dropPos).number - 1;
 
-				let targetIndex: number;
-				if (dropPos >= doc.length) {
-					targetIndex = trailingEmpty ? lines.length - 1 : lines.length;
-				} else {
-					const dropLineInfo = doc.lineAt(dropPos);
-					targetIndex = dropLineInfo.number - 1;
-				}
+				const blockEndExclusive = startIndex + lineCount;
 
-				if (targetIndex > dragIndex) {
-					targetIndex -= 1;
-				}
+				if (targetIndex < startIndex || targetIndex > blockEndExclusive) {
+					const newLines = lines.slice();
+					const movedLines = newLines.splice(startIndex, lineCount);
 
-				if (targetIndex !== dragIndex) {
-					const [movedLine] = lines.splice(dragIndex, 1);
-					if (movedLine != null) {
-						if (targetIndex < 0) {
-							targetIndex = 0;
-						}
-						if (targetIndex > lines.length) {
-							targetIndex = lines.length;
-						}
-						lines.splice(targetIndex, 0, movedLine);
+					if (targetIndex > blockEndExclusive) {
+						targetIndex -= lineCount;
+					}
+					if (targetIndex < 0) {
+						targetIndex = 0;
+					}
+					if (targetIndex > newLines.length) {
+						targetIndex = newLines.length;
+					}
 
-						const lineBreak = state.lineBreak;
-						const newDoc = lines.join(lineBreak);
+					newLines.splice(targetIndex, 0, ...movedLines);
 
-						changes = { from: 0, to: doc.length, insert: newDoc };
-
-						const lineBreakLength = lineBreak.length;
-						let anchor = 0;
-						for (let i = 0; i < targetIndex; i++) {
-							anchor += lines[i].length;
+					const newDoc = newLines.join(lineBreak);
+					const lineBreakLength = lineBreak.length;
+					let anchor = 0;
+					for (let i = 0; i < targetIndex; i++) {
+						anchor += newLines[i].length;
+						if (i < newLines.length - 1) {
 							anchor += lineBreakLength;
 						}
-						selection = EditorSelection.cursor(anchor);
 					}
+
+					changes = { from: 0, to: doc.length, insert: newDoc };
+					selection = EditorSelection.cursor(anchor);
 				}
 			}
 
@@ -232,6 +249,9 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 
 			this.dragLine = null;
 			this.dropLine = null;
+			this.dragBlockEnd = null;
+			this.dragStartLineIndex = null;
+			this.dragLineCount = null;
 
 			this.removeWindowMouseUp?.();
 			this.removeWindowMouseUp = null;
@@ -283,12 +303,92 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 					? doc.line(line.number + 1).from
 					: line.to;
 
+			const blockStart = this.dragLine;
+			const blockEnd = this.dragBlockEnd;
+			if (
+				blockStart != null &&
+				blockEnd != null &&
+				targetPos > blockStart &&
+				targetPos < blockEnd
+			) {
+				if (this.dropLine != null) {
+					this.view.dispatch({ effects: setDropIndicator.of(null) });
+					this.dropLine = null;
+				}
+				return;
+			}
+
 			if (this.dropLine === targetPos) {
 				return;
 			}
 
 			this.dropLine = targetPos;
 			this.view.dispatch({ effects: setDropIndicator.of(targetPos) });
+		}
+
+		private resolveBlockRange(doc: Text, line: Line): { startLine: number; endLine: number } {
+			const totalLines = doc.lines;
+			const currentNumber = line.number;
+			const text = line.text;
+
+			const headingMatch = text.match(/^(#{1,6})\s/);
+			if (headingMatch) {
+				const level = headingMatch[1].length;
+				let end = currentNumber;
+				for (let i = currentNumber + 1; i <= totalLines; i++) {
+					const candidate = doc.line(i);
+					const candidateText = candidate.text;
+					const candidateHeading = candidateText.match(/^(#{1,6})\s/);
+					if (candidateHeading && candidateHeading[1].length <= level) {
+						break;
+					}
+					end = i;
+				}
+				return { startLine: currentNumber, endLine: end };
+			}
+
+			const listMatch = text.match(/^(\s*)([-+*]|\d+[.)])\s/);
+			if (listMatch) {
+				const baseIndent = this.countIndentation(listMatch[1] ?? "");
+				let end = currentNumber;
+				for (let i = currentNumber + 1; i <= totalLines; i++) {
+					const candidate = doc.line(i);
+					const candidateText = candidate.text;
+					if (!candidateText.trim()) {
+						end = i;
+						continue;
+					}
+					const indentMatch = candidateText.match(/^(\s*)/);
+					const indent = this.countIndentation(indentMatch?.[1] ?? "");
+					const isListItem = /^(\s*)([-+*]|\d+[.)])\s/.test(candidateText);
+					const isHeading = /^(#{1,6})\s/.test(candidateText);
+					if (isHeading && indent <= baseIndent) {
+						break;
+					}
+					if (isListItem && indent <= baseIndent) {
+						break;
+					}
+					if (!isListItem && indent <= baseIndent) {
+						break;
+					}
+					end = i;
+				}
+				return { startLine: currentNumber, endLine: end };
+			}
+
+			return { startLine: currentNumber, endLine: currentNumber };
+		}
+
+		private countIndentation(indentation: string): number {
+			let count = 0;
+			for (const char of indentation) {
+				if (char === "\t") {
+					count += 4;
+				} else if (char === " ") {
+					count += 1;
+				}
+			}
+			return count;
 		}
 	},
 );
