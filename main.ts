@@ -1,5 +1,7 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 
+import { createDragHandleExtension } from "./src/drag-handle-extension";
+
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
@@ -10,7 +12,13 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: 'default'
 }
 
-export default class MyPlugin extends Plugin {
+export default class DragAndDropPlugin extends Plugin {
+	async onload() {
+		this.registerEditorExtension(createDragHandleExtension());
+	}
+}
+
+export class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
 	async onload() {
