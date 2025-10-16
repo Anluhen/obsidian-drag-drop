@@ -96,14 +96,13 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 			const target = event.target as HTMLElement | null;
 			console.log("target: ", target)
 			const lineStart = Number(target?.dataset.lineStart);
-			if (Number.isNaN(lineStart)) {
-				return;
+			if (!Number.isNaN(lineStart)) {
+				const line = this.view.state.doc.lineAt(lineStart) as Line;
+
+				this.dropLine = line.from;
+
+				console.log("dropLine: ", this.dropLine)
 			}
-
-			const line = this.view.state.doc.lineAt(lineStart) as Line;
-
-			this.dropLine = line.from;
-			console.log("dropLine: ", this.dropLine)
 
 			if (this.dragLine == null) return;
 
