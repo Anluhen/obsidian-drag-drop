@@ -53,6 +53,7 @@ class DragHandleMarker extends GutterMarker {
 
 const DragHandlePlugin = ViewPlugin.fromClass(
 	class DragHandleController {
+		private dropLine: number | null = null;
 		private dragLine: number | null = null;
 		private removeWindowMouseUp: (() => void) | null = null;
 		private readonly onWindowMouseUp = (event: MouseEvent) => this.handleMouseUp(event);
@@ -91,6 +92,18 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 		}
 
 		handleMouseUp(event: MouseEvent): void {
+
+			const target = event.target as HTMLElement | null;
+			console.log("target: ", target)
+			const lineStart = Number(target?.dataset.lineStart);
+			if (Number.isNaN(lineStart)) {
+				return;
+			}
+
+			const line = this.view.state.doc.lineAt(lineStart) as Line;
+
+			this.dropLine = line.from;
+			console.log("dropLine: ", this.dropLine)
 
 			if (this.dragLine == null) return;
 
