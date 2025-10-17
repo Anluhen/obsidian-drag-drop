@@ -331,6 +331,26 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 			const currentNumber = line.number;
 			const text = line.text;
 
+			const calloutMatch = text.match(/^(\s*)>\s*\[![^\]]+\].*/i);
+			if (calloutMatch) {
+				const baseIndentation = this.countIndentation(calloutMatch[1] ?? "");
+				let end = currentNumber;
+				for (let i = currentNumber + 1; i <= totalLines; i++) {
+					const candidate = doc.line(i);
+					const candidateText = candidate.text;
+					if (!candidateText.trimStart().startsWith(">")) {
+						break;
+					}
+					const indentMatch = candidateText.match(/^(\s*)/);
+					const indent = this.countIndentation(indentMatch?.[1] ?? "");
+					if (indent < baseIndentation) {
+						break;
+					}
+					end = i;
+				}
+				return { startLine: currentNumber, endLine: end };
+			}
+
 			const headingMatch = text.match(/^(#{1,6})\s/);
 			if (headingMatch) {
 				const level = headingMatch[1].length;
@@ -345,6 +365,24 @@ const DragHandlePlugin = ViewPlugin.fromClass(
 					end = i;
 				}
 				return { startLine: currentNumber, endLine: end };
+			}
+
+			const fenceMatch = text.match(/^(\s*)(`{3,}|~{3,}).*/);
+			if (fenceMatch) {
+				const fenceChar = fenceMatch[2][0];
+				const fenceLength = fenceMatch[2].length;
+				let end = currentNumber;
+				const closingFencePattern = new RegExp(`^\\s*${fenceChar}{${fenceLength},}\\s*$`);
+				for (let i = currentNumber + 1; i <= totalLines; i++) {
+					const candidateText = doc.line(i).text;
+					if (closingFencePattern.test(candidateText)) {
+						end = i;
+						break;
+					}
+				}
+				if (end !== currentNumber) {
+					return { startLine: currentNumber, endLine: end };
+				}
 			}
 
 			const listMatch = text.match(/^(\s*)([-+*]|\d+[.)])\s/);
