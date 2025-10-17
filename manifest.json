@@ -2,10 +2,9 @@
 	"id": "drag-n-drop-plugin",
 	"name": "Drag and Drop",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Allow dragging and dropping lines",
+	"minAppVersion": "1.9.12",
+	"description": "Allow dragging and dropping lines.",
 	"author": "Anluhen",
 	"authorUrl": "https://github.com/Anluhen",
-	"fundingUrl": "",
-	"isDesktopOnly": false
+	"isDesktopOnly": true
 }
