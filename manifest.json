@@ -1,6 +1,6 @@
 {
-	"id": "drag-n-drop-plugin",
-	"name": "Drag and Drop",
+	"id": "drag-n-drop-lines",
+	"name": "Drag and Drop Lines",
 	"version": "1.0.0",
 	"minAppVersion": "1.9.12",
 	"description": "Allow dragging and dropping lines.",
