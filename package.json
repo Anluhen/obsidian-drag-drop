@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-drag-drop",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Obsidian plugin to drag and drop lines, list items, headings, callouts and code blocks in the editor.",
 	"main": "main.js",
 	"scripts": {
