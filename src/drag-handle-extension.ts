@@ -1,31 +1,43 @@
+import { StateEffect, StateField, type Extension, type Range, type Text } from "@codemirror/state";
 import {
-	Line,
-	StateEffect,
-	StateField,
-	RangeSetBuilder,
-	EditorSelection,
-	SelectionRange,
-	Text,
-	type Extension,
-} from "@codemirror/state";
-import {
+	Decoration,
 	EditorView,
 	GutterMarker,
 	ViewPlugin,
 	WidgetType,
 	gutter,
+	type DecorationSet,
+	type PluginValue,
+	type ViewUpdate,
 } from "@codemirror/view";
 
-import { Decoration, DecorationSet } from "@codemirror/view";
+import {
+	frontmatterEnd,
+	isValidDropTarget,
+	moveLines,
+	normalizeTarget,
+	resolveBlock,
+	type LineRange,
+} from "./blocks";
 
-const setHighlightedLine = StateEffect.define<number | null>();
-const setDropIndicator = StateEffect.define<number | null>();
+/** Distance from the editor's top or bottom edge, in pixels, that scrolls while dragging. */
+const AUTO_SCROLL_MARGIN = 40;
+
+interface DragState {
+	source: LineRange;
+	/** Line the block will be inserted before; doc.lines + 1 means the end. */
+	target: number | null;
+}
+
+const setDragState = StateEffect.define<DragState | null>();
 
 class DropIndicatorWidget extends WidgetType {
+	eq(): boolean {
+		return true;
+	}
+
 	toDOM(): HTMLElement {
-		const element = document.createElement("div");
-		element.className = "cm-drop-indicator";
-		return element;
+		return createDiv({ cls: "dnd-lines-drop-indicator" });
 	}
 
 	ignoreEvent(): boolean {
@@ -33,458 +45,195 @@ class DropIndicatorWidget extends WidgetType {
 	}
 }
 
-const highlightedLineField = StateField.define<DecorationSet>({
+const sourceLine = Decoration.line({ class: "dnd-lines-source" });
+
+function buildDecorations(doc: Text, drag: DragState): DecorationSet {
+	const ranges: Range<Decoration>[] = [];
+	for (let n = drag.source.start; n <= drag.source.end; n++) {
+		ranges.push(sourceLine.range(doc.line(n).from));
+	}
+	if (drag.target != null) {
+		const atEnd = drag.target > doc.lines;
+		const indicator = Decoration.widget({
+			widget: new DropIndicatorWidget(),
+			block: true,
+			side: atEnd ? 1 : -1,
+		});
+		ranges.push(indicator.range(atEnd ? doc.length : doc.line(drag.target).from));
+	}
+	return Decoration.set(ranges, true);
+}
+
+const dragDecorations = StateField.define<DecorationSet>({
 	create() {
 		return Decoration.none;
 	},
-	update(decos, tr) {
-		decos = decos.map(tr.changes);
-
+	update(decorations, tr) {
 		for (const effect of tr.effects) {
-			if (effect.is(setHighlightedLine)) {
-				if (effect.value == null) {
-					return Decoration.none;
-				}
-				const builder = new RangeSetBuilder<Decoration>();
-				const line = tr.state.doc.lineAt(effect.value);
-				builder.add(line.from, line.from, Decoration.line({ class: "cm-drag-source" }));
-				return builder.finish();
+			if (effect.is(setDragState)) {
+				return effect.value ? buildDecorations(tr.state.doc, effect.value) : Decoration.none;
 			}
 		}
-
-		return decos;
+		// Any edit cancels the drag, so the decorations would be stale.
+		return tr.docChanged ? Decoration.none : decorations;
 	},
 	provide: field => EditorView.decorations.from(field),
 });
 
-const dropIndicatorField = StateField.define<DecorationSet>({
-	create() {
-		return Decoration.none;
-	},
-	update(decos, tr) {
-		decos = decos.map(tr.changes);
-
-		for (const effect of tr.effects) {
-			if (effect.is(setDropIndicator)) {
-				if (effect.value == null) {
-					return Decoration.none;
-				}
-
-				const builder = new RangeSetBuilder<Decoration>();
-				builder.add(
-					effect.value,
-					effect.value,
-					Decoration.widget({
-						block: true,
-						widget: new DropIndicatorWidget(),
-					}),
-				);
-
-				return builder.finish();
-			}
-		}
-
-		return decos;
-	},
-	provide: field => EditorView.decorations.from(field),
+const frontmatterEndField = StateField.define<number>({
+	create: state => frontmatterEnd(state.doc),
+	update: (end, tr) => (tr.docChanged ? frontmatterEnd(tr.state.doc) : end),
 });
 
-class DragHandleMarker extends GutterMarker {
-	constructor(private readonly lineStart: number) {
-		super();
+class DragController implements PluginValue {
+	private drag: DragState | null = null;
+	private removeListeners: (() => void) | null = null;
+
+	constructor(private readonly view: EditorView) {}
+
+	update(update: ViewUpdate): void {
+		// The dragged line numbers are stale once the document changes.
+		if (this.drag && update.docChanged) this.stop();
 	}
 
-	override toDOM(): HTMLElement {
-		const handle = document.createElement("div");
-		handle.className = "cm-drag-handle";
-		handle.dataset.lineStart = String(this.lineStart);
-		handle.tabIndex = -1;
-		handle.setAttribute("aria-label", "Drag line");
-		return handle;
+	destroy(): void {
+		this.stop();
+	}
+
+	start(lineFrom: number): void {
+		this.stop();
+
+		const state = this.view.state;
+		const line = state.doc.lineAt(lineFrom);
+		if (line.number <= state.field(frontmatterEndField)) return;
+
+		this.drag = { source: resolveBlock(state.doc, line.number, state.tabSize), target: null };
+		this.listen();
+		this.render();
+	}
+
+	private listen(): void {
+		const win = this.view.dom.ownerDocument.defaultView ?? window;
+		const body = win.document.body;
+
+		const onMouseMove = (event: MouseEvent) => this.move(event);
+		const onMouseUp = () => this.drop();
+		const onBlur = () => this.cancel();
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			event.preventDefault();
+			event.stopPropagation();
+			this.cancel();
+		};
+
+		win.addEventListener("mousemove", onMouseMove);
+		win.addEventListener("mouseup", onMouseUp);
+		win.addEventListener("blur", onBlur);
+		win.addEventListener("keydown", onKeyDown, true);
+		body.classList.add("dnd-lines-dragging");
+
+		this.removeListeners = () => {
+			win.removeEventListener("mousemove", onMouseMove);
+			win.removeEventListener("mouseup", onMouseUp);
+			win.removeEventListener("blur", onBlur);
+			win.removeEventListener("keydown", onKeyDown, true);
+			body.classList.remove("dnd-lines-dragging");
+		};
+	}
+
+	/** Ends the drag without touching the editor, which may be mid-update or destroyed. */
+	private stop(): void {
+		this.removeListeners?.();
+		this.removeListeners = null;
+		this.drag = null;
+	}
+
+	private cancel(): void {
+		if (!this.drag) return;
+		this.stop();
+		this.render();
+	}
+
+	private move(event: MouseEvent): void {
+		if (!this.drag) return;
+		this.autoScroll(event.clientY);
+
+		const doc = this.view.state.doc;
+		const y = event.clientY - this.view.documentTop;
+		const block = this.view.lineBlockAtHeight(y);
+		const before = y < (block.top + block.bottom) / 2;
+		const target = normalizeTarget(
+			doc,
+			before ? doc.lineAt(block.from).number : doc.lineAt(block.to).number + 1,
+		);
+		const next = isValidDropTarget(doc, this.drag.source, target) ? target : null;
+		if (next === this.drag.target) return;
+
+		this.drag.target = next;
+		this.render();
+	}
+
+	private drop(): void {
+		const drag = this.drag;
+		this.stop();
+		if (!drag) return;
+		if (drag.target == null) {
+			this.render();
+			return;
+		}
+
+		const state = this.view.state;
+		const { changes, anchor } = moveLines(state.doc, state.lineBreak, drag.source, drag.target);
+		this.view.dispatch({
+			changes,
+			selection: { anchor },
+			effects: setDragState.of(null),
+			userEvent: "move.line",
+		});
+	}
+
+	private autoScroll(clientY: number): void {
+		const scroller = this.view.scrollDOM;
+		const rect = scroller.getBoundingClientRect();
+		if (clientY < rect.top + AUTO_SCROLL_MARGIN) {
+			scroller.scrollTop -= AUTO_SCROLL_MARGIN;
+		} else if (clientY > rect.bottom - AUTO_SCROLL_MARGIN) {
+			scroller.scrollTop += AUTO_SCROLL_MARGIN;
+		}
+	}
+
+	private render(): void {
+		this.view.dispatch({ effects: setDragState.of(this.drag && { ...this.drag }) });
 	}
 }
 
-const DragHandlePlugin = ViewPlugin.fromClass(
-	class DragHandleController {
-		private dropLine: number | null = null;
-		private dragLine: number | null = null;
-		private dragBlockEnd: number | null = null;
-		private dragStartLineIndex: number | null = null;
-		private dragLineCount: number | null = null;
-		private removeWindowMouseUp: (() => void) | null = null;
-		private removeWindowMouseMove: (() => void) | null = null;
-		private readonly onWindowMouseUp = (event: MouseEvent) => this.handleMouseUp(event);
-		private readonly onWindowMouseMove = (event: MouseEvent) => this.handleMouseMove(event);
+const dragController = ViewPlugin.fromClass(DragController);
 
-		constructor(private readonly view: EditorView) { }
+class DragHandleMarker extends GutterMarker {
+	toDOM(): Node {
+		return createDiv({ cls: "dnd-lines-handle", attr: { "aria-label": "Drag to move" } });
+	}
+}
 
-		destroy(): void {
-			if (this.dropLine != null) {
-				this.view.dispatch({ effects: setDropIndicator.of(null) });
-				this.dropLine = null;
-			}
-			this.dragLine = null;
-			this.dragBlockEnd = null;
-			this.dragStartLineIndex = null;
-			this.dragLineCount = null;
-			this.removeWindowMouseUp?.();
-			this.removeWindowMouseUp = null;
-			this.removeWindowMouseMove?.();
-			this.removeWindowMouseMove = null;
-		}
+const dragHandle = new DragHandleMarker();
 
-		handleMouseDown(event: MouseEvent): void {
-
-			const target = event.target as HTMLElement | null;
-
-			const lineStart = Number(target?.dataset.lineStart);
-			if (Number.isNaN(lineStart)) {
-				return;
-			}
-
-			const doc = this.view.state.doc;
-			const line = doc.lineAt(lineStart) as Line;
-			const { startLine, endLine } = this.resolveBlockRange(doc, line);
-			const startLineInfo = doc.line(startLine);
-			const lineCount = Math.max(1, endLine - startLine + 1);
-
-			this.dragStartLineIndex = startLine - 1;
-			this.dragLineCount = lineCount;
-			this.dragLine = startLineInfo.from;
-			this.dragBlockEnd = endLine < doc.lines ? doc.line(endLine + 1).from : doc.length;
-			this.dropLine = null;
-
-			this.view.dispatch({
-				effects: setHighlightedLine.of(this.dragLine),
-			});
-
-			if (!this.removeWindowMouseUp) {
-				window.addEventListener("mouseup", this.onWindowMouseUp);
-				this.removeWindowMouseUp = () => {
-					window.removeEventListener("mouseup", this.onWindowMouseUp);
-					this.removeWindowMouseUp = null;
-				};
-			}
-
-			if (!this.removeWindowMouseMove) {
-				window.addEventListener("mousemove", this.onWindowMouseMove);
-				this.removeWindowMouseMove = () => {
-					window.removeEventListener("mousemove", this.onWindowMouseMove);
-					this.removeWindowMouseMove = null;
-				};
-			}
-		}
-
-		handleMouseUp(_event: MouseEvent): void {
-			if (this.dragLine == null) return;
-
-			const effects = [setHighlightedLine.of(null)];
-			if (this.dropLine != null) {
-				effects.push(setDropIndicator.of(null));
-			}
-
-			const state = this.view.state;
-			const doc = state.doc;
-			const startIndex = this.dragStartLineIndex;
-			const lineCount = this.dragLineCount;
-			const dropPos = this.dropLine;
-			const lineBreak = state.lineBreak;
-
-			let changes: { from: number; to: number; insert: string } | undefined;
-			let selection: SelectionRange | undefined;
-
-			if (startIndex != null && lineCount != null && dropPos != null) {
-				const lines = doc.toJSON();
-				const trailingEmpty = lines.length > 1 && lines[lines.length - 1] === "";
-				let targetIndex =
-					dropPos >= doc.length
-						? trailingEmpty
-							? lines.length - 1
-							: lines.length
-						: doc.lineAt(dropPos).number - 1;
-
-				const blockEndExclusive = startIndex + lineCount;
-
-				if (targetIndex < startIndex || targetIndex > blockEndExclusive) {
-					const newLines = lines.slice();
-					const movedLines = newLines.splice(startIndex, lineCount);
-
-					if (targetIndex > blockEndExclusive) {
-						targetIndex -= lineCount;
-					}
-					if (targetIndex < 0) {
-						targetIndex = 0;
-					}
-					if (targetIndex > newLines.length) {
-						targetIndex = newLines.length;
-					}
-
-					newLines.splice(targetIndex, 0, ...movedLines);
-
-					const newDoc = newLines.join(lineBreak);
-					const lineBreakLength = lineBreak.length;
-					let anchor = 0;
-					for (let i = 0; i < targetIndex; i++) {
-						anchor += newLines[i].length;
-						if (i < newLines.length - 1) {
-							anchor += lineBreakLength;
-						}
-					}
-
-					changes = { from: 0, to: doc.length, insert: newDoc };
-					selection = EditorSelection.cursor(anchor);
-				}
-			}
-
-			const spec: Parameters<EditorView["dispatch"]>[0] = { effects };
-			if (changes) {
-				spec.changes = changes;
-			}
-			if (selection) {
-				spec.selection = selection;
-				spec.scrollIntoView = true;
-			}
-
-			this.view.dispatch(spec);
-
-			this.dragLine = null;
-			this.dropLine = null;
-			this.dragBlockEnd = null;
-			this.dragStartLineIndex = null;
-			this.dragLineCount = null;
-
-			this.removeWindowMouseUp?.();
-			this.removeWindowMouseUp = null;
-			this.removeWindowMouseMove?.();
-			this.removeWindowMouseMove = null;
-		}
-
-		handleMouseMove(event: MouseEvent): void {
-			if (this.dragLine == null) return;
-
-			const pos = this.view.posAtCoords({ x: event.clientX, y: event.clientY });
-			if (pos == null) {
-				if (this.dropLine != null) {
-					this.view.dispatch({ effects: setDropIndicator.of(null) });
-					this.dropLine = null;
-				}
-				return;
-			}
-
-			const doc = this.view.state.doc;
-			const line = doc.lineAt(pos);
-
-			const topCoords = this.view.coordsAtPos(line.from);
-
-			let bottomCoords = this.view.coordsAtPos(line.to);
-			if (!bottomCoords) {
-				const nextLine = line.number < doc.lines ? doc.line(line.number + 1) : null;
-				if (nextLine) {
-					bottomCoords = this.view.coordsAtPos(nextLine.from);
-				}
-			}
-
-			if (!topCoords || !bottomCoords) {
-				return;
-			}
-
-			const topY = topCoords.top ?? topCoords.bottom;
-			const bottomY = bottomCoords.bottom ?? bottomCoords.top;
-
-			if (topY == null || bottomY == null) {
-				return;
-			}
-
-			const midpoint = (topY + bottomY) / 2;
-			const isBefore = event.clientY <= midpoint;
-			const targetPos = isBefore
-				? line.from
-				: line.number < doc.lines
-					? doc.line(line.number + 1).from
-					: line.to;
-
-			const blockStart = this.dragLine;
-			const blockEnd = this.dragBlockEnd;
-			if (
-				blockStart != null &&
-				blockEnd != null &&
-				targetPos > blockStart &&
-				targetPos < blockEnd
-			) {
-				if (this.dropLine != null) {
-					this.view.dispatch({ effects: setDropIndicator.of(null) });
-					this.dropLine = null;
-				}
-				return;
-			}
-
-			if (this.dropLine === targetPos) {
-				return;
-			}
-
-			this.dropLine = targetPos;
-			this.view.dispatch({ effects: setDropIndicator.of(targetPos) });
-		}
-
-		private resolveBlockRange(doc: Text, line: Line): { startLine: number; endLine: number } {
-			const totalLines = doc.lines;
-			const currentNumber = line.number;
-			const text = line.text;
-
-			const calloutMatch = text.match(/^(\s*)>\s*\[![^\]]+\].*/i);
-			if (calloutMatch) {
-				const baseIndentation = this.countIndentation(calloutMatch[1] ?? "");
-				let end = currentNumber;
-				for (let i = currentNumber + 1; i <= totalLines; i++) {
-					const candidate = doc.line(i);
-					const candidateText = candidate.text;
-					if (!candidateText.trimStart().startsWith(">")) {
-						break;
-					}
-					const indentMatch = candidateText.match(/^(\s*)/);
-					const indent = this.countIndentation(indentMatch?.[1] ?? "");
-					if (indent < baseIndentation) {
-						break;
-					}
-					end = i;
-				}
-				return { startLine: currentNumber, endLine: end };
-			}
-
-			const headingMatch = text.match(/^(#{1,6})\s/);
-			if (headingMatch) {
-				const level = headingMatch[1].length;
-				let end = currentNumber;
-				for (let i = currentNumber + 1; i <= totalLines; i++) {
-					const candidate = doc.line(i);
-					const candidateText = candidate.text;
-					const candidateHeading = candidateText.match(/^(#{1,6})\s/);
-					if (candidateHeading && candidateHeading[1].length <= level) {
-						break;
-					}
-					end = i;
-				}
-				return { startLine: currentNumber, endLine: end };
-			}
-
-			const fenceMatch = text.match(/^(\s*)(`{3,}|~{3,}).*/);
-			if (fenceMatch) {
-				const fenceChar = fenceMatch[2][0];
-				const fenceLength = fenceMatch[2].length;
-				let end = currentNumber;
-				const closingFencePattern = new RegExp(`^\\s*${fenceChar}{${fenceLength},}\\s*$`);
-				for (let i = currentNumber + 1; i <= totalLines; i++) {
-					const candidateText = doc.line(i).text;
-					if (closingFencePattern.test(candidateText)) {
-						end = i;
-						break;
-					}
-				}
-				if (end !== currentNumber) {
-					return { startLine: currentNumber, endLine: end };
-				}
-			}
-
-			const listMatch = text.match(/^(\s*)([-+*]|\d+[.)])\s/);
-			if (listMatch) {
-				const baseIndent = this.countIndentation(listMatch[1] ?? "");
-				let end = currentNumber;
-				for (let i = currentNumber + 1; i <= totalLines; i++) {
-					const candidate = doc.line(i);
-					const candidateText = candidate.text;
-					if (!candidateText.trim()) {
-						end = i;
-						continue;
-					}
-					const indentMatch = candidateText.match(/^(\s*)/);
-					const indent = this.countIndentation(indentMatch?.[1] ?? "");
-					const isListItem = /^(\s*)([-+*]|\d+[.)])\s/.test(candidateText);
-					const isHeading = /^(#{1,6})\s/.test(candidateText);
-					if (isHeading && indent <= baseIndent) {
-						break;
-					}
-					if (isListItem && indent <= baseIndent) {
-						break;
-					}
-					if (!isListItem && indent <= baseIndent) {
-						break;
-					}
-					end = i;
-				}
-				return { startLine: currentNumber, endLine: end };
-			}
-
-			return { startLine: currentNumber, endLine: currentNumber };
-		}
-
-		private countIndentation(indentation: string): number {
-			let count = 0;
-			for (const char of indentation) {
-				if (char === "\t") {
-					count += 4;
-				} else if (char === " ") {
-					count += 1;
-				}
-			}
-			return count;
-		}
+const dragGutter = gutter({
+	class: "dnd-lines-gutter",
+	lineMarker(view, line) {
+		const lineNumber = view.state.doc.lineAt(line.from).number;
+		return lineNumber > view.state.field(frontmatterEndField) ? dragHandle : null;
 	},
-);
-
-const dragHandleTheme = EditorView.baseTheme({
-	".cm-drag-gutter .cm-drag-handle": {
-		cursor: "grab",
-		display: "flex",
-		alignItems: "center",
-		justifyContent: "center",
-		position: "relative",
-		width: "100%",
-		height: "100%",
-	},
-	".cm-drag-gutter .cm-drag-handle::after": {
-		content: '"::"',
-		color: "var(--text-muted, #888)",
-		fontSize: "0.7rem",
-		letterSpacing: "0.2rem",
-		opacity: 0,
-		transition: "opacity 120ms ease",
-	},
-	".cm-drag-gutter .cm-drag-handle:hover::after": {
-		opacity: 1,
-	},
-	".cm-line.cm-drag-source": {
-		backgroundColor: "var(--background-modifier-hover)",
-	},
-	".cm-drop-indicator": {
-		borderTop: "2px solid var(--interactive-accent)",
-		height: "0",
-		margin: "0 -4px",
-		pointerEvents: "none",
+	domEventHandlers: {
+		mousedown(view, line, event) {
+			const mouse = event as MouseEvent;
+			const onHandle = (mouse.target as HTMLElement).closest(".dnd-lines-handle");
+			if (mouse.button !== 0 || !onHandle) return false;
+			view.plugin(dragController)?.start(line.from);
+			return true;
+		},
 	},
 });
 
 export function createDragHandleExtension(): Extension {
-	const dragHandleGutter = gutter({
-		class: "cm-drag-gutter",
-		lineMarker(_view, line) {
-			return new DragHandleMarker(line.from);
-		},
-		domEventHandlers: {
-			mousedown(view, _line, event) {
-				const handle = (event.target as HTMLElement).closest(".cm-drag-handle");
-				if (!handle) return false;
-				view.plugin(DragHandlePlugin)?.handleMouseDown(event as MouseEvent);
-				return true; // stop the editor-wide handler
-			},
-			mouseup(view, _line, event) {
-				const handle = (event.target as HTMLElement).closest(".cm-drag-handle");
-				if (!handle) return false;
-				view.plugin(DragHandlePlugin)?.handleMouseUp(event as MouseEvent);
-				return true; // stop the editor-wide handler
-			},
-		},
-	});
-
-	return [dragHandleGutter, DragHandlePlugin, dragHandleTheme, highlightedLineField, dropIndicatorField];
-
+	return [frontmatterEndField, dragDecorations, dragController, dragGutter];
 }
