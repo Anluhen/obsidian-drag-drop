@@ -3,7 +3,7 @@
 	"name": "Drag and Drop Lines",
 	"version": "1.0.0",
 	"minAppVersion": "1.9.12",
-	"description": "Allow dragging and dropping lines.",
+	"description": "Drag and drop lines, list items, headings, callouts and code blocks in the editor.",
 	"author": "Anluhen",
 	"authorUrl": "https://github.com/Anluhen",
 	"isDesktopOnly": true
